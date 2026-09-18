@@ -15,7 +15,7 @@
     
     # Dizinler ve Webhook Tanımları
     local_backup_dir: "/home/jenkins/dev_sync_backups"
-    remote_backup_dir: "/home/jenkins/prod_backups"
+    remote_backup_dir: "/postgres/data/prod_backups"
     webhook_url: "https://jenkins-test.atros.com.tr/generic-webhook-trigger/invoke"
     
     # Yasaklı (Sistem) Veritabanları Listesi
@@ -99,3 +99,8 @@
             path: "{{ local_backup_dir }}/{{ run_id }}"
             state: absent
           ignore_errors: yes
+		  
+		  
+		  
+		  
+		  https://github.com/dba179/Nova-prod-to-dev.git
