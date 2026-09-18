@@ -1,24 +1,23 @@
 ---
-- name: Prod to Dev Database Migration
+- name: Prod to Dev PostgreSQL Database Migration (End-to-End)
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
-    # AWX Anketinden (Survey) boş gelirse kullanılacak varsayılan VIP adresleriniz
+    # VIP Tanımları
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # Geçici dump dosyalarının kopyalanacağı sunucu (Güncellendi)
-    nonprod_db_agent: "172.18.10.131"
-    nonprod_user: "jenkins"
+    # Geçici Dump ve Restore Yapılacak Sunucu
+    target_db_server: "172.18.10.131"
+    ssh_user: "postgres"
     
-    # Dizinler ve Webhook Tanımları
-    local_backup_dir: "/home/jenkins/dev_sync_backups"
+    # Dizinler
+    local_backup_dir: "/tmp/dev_sync_backups"
     remote_backup_dir: "/postgres/data/prod_backups"
-    webhook_url: "https://jenkins-test.atros.com.tr/generic-webhook-trigger/invoke"
     
-    # Yasaklı (Sistem) Veritabanları Listesi
+    # Yasaklı Sistem Veritabanları
     restricted_dbs:
       - postgres
       - admin
@@ -26,81 +25,78 @@
       - template0
       - template1
 
-    # Jenkins BUILD_NUMBER yerine geçecek benzersiz İşlem Kimliği (Timestamp)
+    # Benzersiz İşlem Kimliği (Timestamp)
     run_id: "{{ '%Y%m%d_%H%M%S' | strftime }}"
 
   pre_tasks:
-    - name: "Parametre Kontrolü: DB_NAME (Veritabanı Adı) girilmiş mi?"
+    - name: "Parametre Kontrolü: DB_NAME girilmiş mi?"
       fail:
-        msg: "HATA: Veritabanı adı girilmedi! Lütfen AWX üzerinden taşınacak veritabanı adını belirtin."
+        msg: "HATA: Veritabanı adı girilmedi! Lütfen AWX üzerinden taşınacak DB adını girin."
       when: db_names is not defined or db_names == ''
 
-    - name: "Veri Hazırlığı: Girilen veritabanı adlarını listeye çevir"
+    - name: "Veritabanı listesini hazırla"
       set_fact:
         db_list: "{{ db_names.split(',') | map('trim') | select('match', '^.+$') | list }}"
 
     - name: "Güvenlik Kontrolü: Sistem veritabanı taşınamaz!"
       fail:
-        msg: "HATA: Sistem veritabanı ({{ item }}) taşınamaz! Lütfen geçerli bir veritabanı girin."
+        msg: "HATA: Sistem veritabanı ({{ item }}) taşınamaz!"
       when: item | lower in restricted_dbs
       loop: "{{ db_list }}"
 
-    - name: "Log Bilgisi: İşlem Özeti"
+    - name: İşlem Bilgilendirmesi
       debug:
-        msg: "Hedef DB'ler: {{ db_list }}. Kaynak VIP: {{ backup_db_host | default(default_backup_host) }}. Hedef VIP: {{ restore_db_host | default(default_restore_host) }}"
+        msg: "Taşınacak DB'ler: {{ db_list }}. Kaynak VIP: {{ backup_db_host | default(default_backup_host) }}. Hedef Sunucu: {{ target_db_server }}"
 
   tasks:
-    - name: Migration İşlemleri Ana Bloğu
+    - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Hazırlık: Lokal yedekleme klasörünü oluştur"
+        - name: "Lokal geçici klasörü oluştur"
           file:
             path: "{{ local_backup_dir }}/{{ run_id }}"
             state: directory
             mode: '0755'
 
-        - name: "Aşama 1: PostgreSQL Dump Alma İşlemi"
+        - name: "Adım 1: Prod VIP üzerinden pg_dump al"
           shell: >
             pg_dump -h "{{ backup_db_host | default(default_backup_host) }}" -U "{{ pg_user }}" -d "{{ item }}" -Fc -f "{{ local_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           environment:
             PGPASSWORD: "{{ pg_password }}"
           loop: "{{ db_list }}"
-          no_log: true # DİKKAT: Veritabanı şifresinin AWX loglarına sızmasını engeller.
+          no_log: true
 
-        - name: "Aşama 2: Uzak sunucuda ({{ nonprod_db_agent }}) klasör oluştur"
+        - name: "Adım 2: Hedef sunucuda ({{ target_db_server }}) /postgres/data altında klasör aç"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ nonprod_user }}@{{ nonprod_db_agent }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
 
-        - name: "Aşama 3: Yedek dosyalarını geçici sunucuya ({{ nonprod_db_agent }}) SCP ile kopyala"
+        - name: "Adım 3: Dump dosyalarını hedef sunucuya SCP ile aktar"
           shell: >
-            scp -o StrictHostKeyChecking=no {{ local_backup_dir }}/{{ run_id }}/*.dump {{ nonprod_user }}@{{ nonprod_db_agent }}:{{ remote_backup_dir }}/{{ run_id }}/
+            scp -o StrictHostKeyChecking=no {{ local_backup_dir }}/{{ run_id }}/*.dump {{ ssh_user }}@{{ target_db_server }}:{{ remote_backup_dir }}/{{ run_id }}/
 
-        - name: "Aşama 4: Dev (Nonprod) Geri Yükleme Pipeline'ını Webhook ile Tetikle"
-          uri:
-            url: "{{ webhook_url }}?token={{ webhook_token }}"
-            method: POST
-            headers:
-              Content-Type: "application/json"
-            body_format: json
-            body:
-              backup_dir: "{{ remote_backup_dir }}/{{ run_id }}"
-              restore_db_host: "{{ restore_db_host | default(default_restore_host) }}"
-              db_names: "{{ db_list | join(',') }}"
-              prod_build_number: "{{ run_id }}"
-            status_code: [200, 201, 202]
-          register: webhook_response
+        - name: "Adım 4: Hedef sunucuda veritabanını oluştur (Yoksa)"
+          shell: >
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "psql -U postgres -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -U postgres {{ item }}"
+          loop: "{{ db_list }}"
 
-        - name: "Aşama 5: Webhook Sonucunu Yazdır"
+        - name: "Adım 5: Hedef sunucuda pg_restore çalıştır"
+          shell: >
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "pg_restore -U postgres -d {{ item }} --clean --if-exists --no-owner --no-privileges {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+          loop: "{{ db_list }}"
+          register: restore_output
+          failed_when: restore_output.rc not in [0, 1] # pg_restore ufak warninglerde rc=1 dönebilir, patlamasın
+
+        - name: "İşlem Başarılı Bilgisi"
           debug:
-            msg: "BAŞARILI! Nonprod pipeline tetiklendi. HTTP Kod: {{ webhook_response.status }}"
+            msg: "Veritabanı/veritabanları başarıyla Dev ortamına aktarıldı ve restore edildi."
 
       always:
-        - name: "Temizlik: Lokal yedek dosyalarını sil (İşlem başarılı da olsa hata da alsa diski korur)"
+        - name: "Temizlik 1: AWX lokalindeki geçici dosyaları sil"
           file:
             path: "{{ local_backup_dir }}/{{ run_id }}"
             state: absent
           ignore_errors: yes
-		  
-		  
-		  
-		  
-		  https://github.com/dba179/Nova-prod-to-dev.git
+
+        - name: "Temizlik 2: Hedef sunucudaki ({{ target_db_server }}) dump dosyalarını sil"
+          shell: >
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "rm -rf {{ remote_backup_dir }}/{{ run_id }}"
+          ignore_errors: yes
