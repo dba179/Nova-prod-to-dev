@@ -1,5 +1,5 @@
 ---
-- name: Prod to Dev PostgreSQL Database Migration (End-to-End)
+- name: Prod to Dev PostgreSQL Database Migration (Via Target Server)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -9,12 +9,12 @@
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # Geçici Dump ve Restore Yapılacak Sunucu
+    # Kullanıcı ve Sunucu Bilgileri
+    pg_user: "backupadm"
     target_db_server: "172.18.10.131"
     ssh_user: "postgres"
     
-    # Dizinler
-    local_backup_dir: "/tmp/dev_sync_backups"
+    # Disk Yolu
     remote_backup_dir: "/postgres/data/prod_backups"
     
     # Yasaklı Sistem Veritabanları
@@ -34,6 +34,11 @@
         msg: "HATA: Veritabanı adı girilmedi! Lütfen AWX üzerinden taşınacak DB adını girin."
       when: db_names is not defined or db_names == ''
 
+    - name: "Güvenlik Kontrolü: Şifre credential üzerinden geldi mi?"
+      fail:
+        msg: "HATA: pg_password tanımlı değil! Job Template'e Credential bağlandığından emin olun."
+      when: pg_password is not defined or pg_password == ''
+
     - name: "Veritabanı listesini hazırla"
       set_fact:
         db_list: "{{ db_names.split(',') | map('trim') | select('match', '^.+$') | list }}"
@@ -46,57 +51,39 @@
 
     - name: İşlem Bilgilendirmesi
       debug:
-        msg: "Taşınacak DB'ler: {{ db_list }}. Kaynak VIP: {{ backup_db_host | default(default_backup_host) }}. Hedef Sunucu: {{ target_db_server }}"
+        msg: "Taşıma işlemi backupadm kullanıcısıyla 172.18.10.131 üzerinden yürütülecektir."
 
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Lokal geçici klasörü oluştur"
-          file:
-            path: "{{ local_backup_dir }}/{{ run_id }}"
-            state: directory
-            mode: '0755'
-
-        - name: "Adım 1: Prod VIP üzerinden pg_dump al"
-          shell: >
-            pg_dump -h "{{ backup_db_host | default(default_backup_host) }}" -U "{{ pg_user }}" -d "{{ item }}" -Fc -f "{{ local_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
-          environment:
-            PGPASSWORD: "{{ pg_password }}"
-          loop: "{{ db_list }}"
-          no_log: true
-
-        - name: "Adım 2: Hedef sunucuda ({{ target_db_server }}) /postgres/data altında klasör aç"
+        - name: "Adım 1: Hedef sunucuda (/postgres/data) geçici klasör aç"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
 
-        - name: "Adım 3: Dump dosyalarını hedef sunucuya SCP ile aktar"
+        - name: "Adım 2: Hedef sunucudan Prod VIP'ye bağlanıp pg_dump al"
           shell: >
-            scp -o StrictHostKeyChecking=no {{ local_backup_dir }}/{{ run_id }}/*.dump {{ ssh_user }}@{{ target_db_server }}:{{ remote_backup_dir }}/{{ run_id }}/
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ pg_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+          loop: "{{ db_list }}"
+          no_log: true
 
-        - name: "Adım 4: Hedef sunucuda veritabanını oluştur (Yoksa)"
+        - name: "Adım 3: Hedefte veritabanını oluştur (Yoksa)"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "psql -U postgres -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -U postgres {{ item }}"
           loop: "{{ db_list }}"
 
-        - name: "Adım 5: Hedef sunucuda pg_restore çalıştır"
+        - name: "Adım 4: Hedef sunucuda lokalden pg_restore çalıştır"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "pg_restore -U postgres -d {{ item }} --clean --if-exists --no-owner --no-privileges {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           register: restore_output
-          failed_when: restore_output.rc not in [0, 1] # pg_restore ufak warninglerde rc=1 dönebilir, patlamasın
+          failed_when: restore_output.rc not in [0, 1]
 
-        - name: "İşlem Başarılı Bilgisi"
+        - name: "İşlem Özeti"
           debug:
-            msg: "Veritabanı/veritabanları başarıyla Dev ortamına aktarıldı ve restore edildi."
+            msg: "Veritabanları başarıyla 172.18.10.131 üzerinde restore edildi."
 
       always:
-        - name: "Temizlik 1: AWX lokalindeki geçici dosyaları sil"
-          file:
-            path: "{{ local_backup_dir }}/{{ run_id }}"
-            state: absent
-          ignore_errors: yes
-
-        - name: "Temizlik 2: Hedef sunucudaki ({{ target_db_server }}) dump dosyalarını sil"
+        - name: "Temizlik: Hedef sunucudaki dump dosyalarını tamamen sil"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "rm -rf {{ remote_backup_dir }}/{{ run_id }}"
           ignore_errors: yes
