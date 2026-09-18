@@ -1,0 +1,101 @@
+---
+- name: Prod to Dev Database Migration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # AWX Anketinden (Survey) boş gelirse kullanılacak varsayılan VIP adresleriniz
+    default_backup_host: "172.18.42.140"
+    default_restore_host: "10.15.42.93"
+    
+    # Geçici dump dosyalarının kopyalanacağı sunucu (Güncellendi)
+    nonprod_db_agent: "172.18.10.131"
+    nonprod_user: "jenkins"
+    
+    # Dizinler ve Webhook Tanımları
+    local_backup_dir: "/home/jenkins/dev_sync_backups"
+    remote_backup_dir: "/home/jenkins/prod_backups"
+    webhook_url: "https://jenkins-test.atros.com.tr/generic-webhook-trigger/invoke"
+    
+    # Yasaklı (Sistem) Veritabanları Listesi
+    restricted_dbs:
+      - postgres
+      - admin
+      - master
+      - template0
+      - template1
+
+    # Jenkins BUILD_NUMBER yerine geçecek benzersiz İşlem Kimliği (Timestamp)
+    run_id: "{{ '%Y%m%d_%H%M%S' | strftime }}"
+
+  pre_tasks:
+    - name: "Parametre Kontrolü: DB_NAME (Veritabanı Adı) girilmiş mi?"
+      fail:
+        msg: "HATA: Veritabanı adı girilmedi! Lütfen AWX üzerinden taşınacak veritabanı adını belirtin."
+      when: db_names is not defined or db_names == ''
+
+    - name: "Veri Hazırlığı: Girilen veritabanı adlarını listeye çevir"
+      set_fact:
+        db_list: "{{ db_names.split(',') | map('trim') | select('match', '^.+$') | list }}"
+
+    - name: "Güvenlik Kontrolü: Sistem veritabanı taşınamaz!"
+      fail:
+        msg: "HATA: Sistem veritabanı ({{ item }}) taşınamaz! Lütfen geçerli bir veritabanı girin."
+      when: item | lower in restricted_dbs
+      loop: "{{ db_list }}"
+
+    - name: "Log Bilgisi: İşlem Özeti"
+      debug:
+        msg: "Hedef DB'ler: {{ db_list }}. Kaynak VIP: {{ backup_db_host | default(default_backup_host) }}. Hedef VIP: {{ restore_db_host | default(default_restore_host) }}"
+
+  tasks:
+    - name: Migration İşlemleri Ana Bloğu
+      block:
+        - name: "Hazırlık: Lokal yedekleme klasörünü oluştur"
+          file:
+            path: "{{ local_backup_dir }}/{{ run_id }}"
+            state: directory
+            mode: '0755'
+
+        - name: "Aşama 1: PostgreSQL Dump Alma İşlemi"
+          shell: >
+            pg_dump -h "{{ backup_db_host | default(default_backup_host) }}" -U "{{ pg_user }}" -d "{{ item }}" -Fc -f "{{ local_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+          environment:
+            PGPASSWORD: "{{ pg_password }}"
+          loop: "{{ db_list }}"
+          no_log: true # DİKKAT: Veritabanı şifresinin AWX loglarına sızmasını engeller.
+
+        - name: "Aşama 2: Uzak sunucuda ({{ nonprod_db_agent }}) klasör oluştur"
+          shell: >
+            ssh -o StrictHostKeyChecking=no {{ nonprod_user }}@{{ nonprod_db_agent }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
+
+        - name: "Aşama 3: Yedek dosyalarını geçici sunucuya ({{ nonprod_db_agent }}) SCP ile kopyala"
+          shell: >
+            scp -o StrictHostKeyChecking=no {{ local_backup_dir }}/{{ run_id }}/*.dump {{ nonprod_user }}@{{ nonprod_db_agent }}:{{ remote_backup_dir }}/{{ run_id }}/
+
+        - name: "Aşama 4: Dev (Nonprod) Geri Yükleme Pipeline'ını Webhook ile Tetikle"
+          uri:
+            url: "{{ webhook_url }}?token={{ webhook_token }}"
+            method: POST
+            headers:
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              backup_dir: "{{ remote_backup_dir }}/{{ run_id }}"
+              restore_db_host: "{{ restore_db_host | default(default_restore_host) }}"
+              db_names: "{{ db_list | join(',') }}"
+              prod_build_number: "{{ run_id }}"
+            status_code: [200, 201, 202]
+          register: webhook_response
+
+        - name: "Aşama 5: Webhook Sonucunu Yazdır"
+          debug:
+            msg: "BAŞARILI! Nonprod pipeline tetiklendi. HTTP Kod: {{ webhook_response.status }}"
+
+      always:
+        - name: "Temizlik: Lokal yedek dosyalarını sil (İşlem başarılı da olsa hata da alsa diski korur)"
+          file:
+            path: "{{ local_backup_dir }}/{{ run_id }}"
+            state: absent
+          ignore_errors: yes
