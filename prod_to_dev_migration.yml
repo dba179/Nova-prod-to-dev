@@ -1,20 +1,23 @@
 ---
-- name: Prod to Dev PostgreSQL Database Migration (Via Target Server)
+- name: Prod to Dev PostgreSQL Database Migration (Via Bridge Server to Dev Target)
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
-    # VIP Tanımları
+    # Kaynak ve Hedef DB Hostları
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # Kullanıcı ve Hedef Sunucu Bilgileri
-    pg_user: "backupadm"
-    target_db_server: "10.14.8.18"
+    # İşlemi Yönetecek / Dump'ı Barındıracak Köprü Sunucu
+    bridge_server: "10.14.8.18"
     ssh_user: "postgres"
     
-    # Disk Yolu
+    # Kullanıcılar
+    prod_backup_user: "backupadm"
+    dev_db_user: "postgres"
+    
+    # Disk Yolu (10.14.8.18 üzerindeki geçici alan)
     remote_backup_dir: "/postgres/data/backup"
     
     # Yasaklı Sistem Veritabanları
@@ -51,32 +54,36 @@
 
     - name: İşlem Bilgilendirmesi
       debug:
-        msg: "Taşıma işlemi backupadm kullanıcısıyla {{ target_db_server }} üzerinden yürütülecektir. Hedef Dizin: {{ remote_backup_dir }}"
+        msg: 
+          - "Kaynak Prod VIP : {{ backup_db_host | default(default_backup_host) }}"
+          - "Hedef Dev DB    : {{ restore_db_host | default(default_restore_host) }}"
+          - "İşlem Sunucusu  : {{ bridge_server }} (Dizin: {{ remote_backup_dir }})"
+          - "Taşınacak DB'ler: {{ db_list }}"
 
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Adım 1: Hedef sunucuda ({{ target_db_server }}) backup klasörünü aç"
+        - name: "Adım 1: İşlem sunucusunda ({{ bridge_server }}) geçici backup klasörünü aç"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
 
-        - name: "Adım 2: Hedef sunucu üzerinden Prod VIP'den doğrudan dump çek"
+        - name: "Adım 2: İşlem sunucusu üzerinden Prod VIP'den dump çek"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ pg_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           no_log: true
           register: dump_result
           failed_when: dump_result.rc != 0
 
-        - name: "Adım 3: Hedefte veritabanını oluştur (Yoksa)"
+        - name: "Adım 3: Asıl hedef sunucuda ({{ restore_db_host | default(default_restore_host) }}) veritabanını oluştur (Yoksa)"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "psql -U postgres -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -U postgres {{ item }}"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_user }} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_user }} {{ item }}"
           loop: "{{ db_list }}"
           register: createdb_result
 
-        - name: "Adım 4: Hedef sunucuda lokalden pg_restore çalıştır"
+        - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "pg_restore -U postgres -d {{ item }} --clean --if-exists --no-owner --no-privileges {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_user }} -d {{ item }} --clean --if-exists --no-owner --no-privileges {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
@@ -89,7 +96,7 @@
 
         - name: "İşlem Özeti"
           debug:
-            msg: "Tüm veritabanları ({{ db_list }}) {{ target_db_server }} üzerinde başarıyla restore edildi."
+            msg: "Tüm veritabanları ({{ db_list }}) başarıyla {{ restore_db_host | default(default_restore_host) }} üzerine restore edildi."
 
       rescue:
         - name: "HATA BİLDİRİMİ: pg_dump Hatası (Şifre gizlenerek basılır)"
@@ -103,7 +110,7 @@
             msg: "Pipeline sırasında beklenmeyen bir hata oluştu! Yukarıdaki task çıktılarını kontrol edin."
 
       always:
-        - name: "Temizlik: Hedef sunucudaki ({{ target_db_server }}) dump klasörünü tamamen sil"
+        - name: "Temizlik: İşlem sunucusundaki ({{ bridge_server }}) dump klasörünü tamamen sil"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "rm -rf {{ remote_backup_dir }}/{{ run_id }}"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "rm -rf {{ remote_backup_dir }}/{{ run_id }}"
           ignore_errors: yes
