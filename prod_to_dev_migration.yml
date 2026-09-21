@@ -9,13 +9,13 @@
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # Kullanıcı ve Sunucu Bilgileri
+    # Kullanıcı ve Hedef Sunucu Bilgileri (Güncellendi)
     pg_user: "backupadm"
-    target_db_server: "172.18.10.131"
+    target_db_server: "10.14.8.18"
     ssh_user: "postgres"
     
-    # Disk Yolu
-    remote_backup_dir: "/postgres/data/prod_backups"
+    # Disk Yolu (Güncellendi)
+    remote_backup_dir: "/postgres/data/backup"
     
     # Yasaklı Sistem Veritabanları
     restricted_dbs:
@@ -51,16 +51,16 @@
 
     - name: İşlem Bilgilendirmesi
       debug:
-        msg: "Taşıma işlemi backupadm kullanıcısıyla 172.18.10.131 üzerinden yürütülecektir."
+        msg: "Taşıma işlemi backupadm kullanıcısıyla {{ target_db_server }} üzerinden yürütülecektir. Hedef Dizin: {{ remote_backup_dir }}"
 
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Adım 1: Hedef sunucuda (/postgres/data) geçici klasör aç"
+        - name: "Adım 1: Hedef sunucuda ({{ target_db_server }}) backup klasörünü aç"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
 
-        - name: "Adım 2: Hedef sunucudan Prod VIP'ye bağlanıp pg_dump al"
+        - name: "Adım 2: Hedef sunucu üzerinden Prod VIP'den doğrudan dump çek"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ pg_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
@@ -80,10 +80,10 @@
 
         - name: "İşlem Özeti"
           debug:
-            msg: "Veritabanları başarıyla 172.18.10.131 üzerinde restore edildi."
+            msg: "Tüm veritabanları {{ target_db_server }} üzerinde başarıyla restore edildi."
 
       always:
-        - name: "Temizlik: Hedef sunucudaki dump dosyalarını tamamen sil"
+        - name: "Temizlik: Hedef sunucudaki ({{ target_db_server }}) dump klasörünü tamamen sil"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "rm -rf {{ remote_backup_dir }}/{{ run_id }}"
           ignore_errors: yes
