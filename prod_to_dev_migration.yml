@@ -9,12 +9,12 @@
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # Kullanıcı ve Hedef Sunucu Bilgileri (Güncellendi)
+    # Kullanıcı ve Hedef Sunucu Bilgileri
     pg_user: "backupadm"
     target_db_server: "10.14.8.18"
     ssh_user: "postgres"
     
-    # Disk Yolu (Güncellendi)
+    # Disk Yolu
     remote_backup_dir: "/postgres/data/backup"
     
     # Yasaklı Sistem Veritabanları
@@ -65,11 +65,14 @@
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ pg_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           no_log: true
+          register: dump_result
+          failed_when: dump_result.rc != 0
 
         - name: "Adım 3: Hedefte veritabanını oluştur (Yoksa)"
           shell: >
             ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ target_db_server }} "psql -U postgres -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -U postgres {{ item }}"
           loop: "{{ db_list }}"
+          register: createdb_result
 
         - name: "Adım 4: Hedef sunucuda lokalden pg_restore çalıştır"
           shell: >
@@ -78,9 +81,26 @@
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
+        - name: "Restore Logları ve Uyarılar"
+          debug:
+            msg: "Restore tamamlandı. Çıktı: {{ item.stderr_lines }}"
+          loop: "{{ restore_output.results }}"
+          when: item.stderr_lines is defined and item.stderr_lines | length > 0
+
         - name: "İşlem Özeti"
           debug:
-            msg: "Tüm veritabanları {{ target_db_server }} üzerinde başarıyla restore edildi."
+            msg: "Tüm veritabanları ({{ db_list }}) {{ target_db_server }} üzerinde başarıyla restore edildi."
+
+      rescue:
+        - name: "HATA BİLDİRİMİ: pg_dump Hatası (Şifre gizlenerek basılır)"
+          fail:
+            msg: "HATA: pg_dump adımında sorun oluştu! Sunucu yanıtı: {{ item.stderr }}"
+          loop: "{{ dump_result.results | default([]) }}"
+          when: item.failed is defined and item.failed
+
+        - name: "HATA BİLDİRİMİ: Genel Hata"
+          fail:
+            msg: "Pipeline sırasında beklenmeyen bir hata oluştu! Yukarıdaki task çıktılarını kontrol edin."
 
       always:
         - name: "Temizlik: Hedef sunucudaki ({{ target_db_server }}) dump klasörünü tamamen sil"
