@@ -83,16 +83,16 @@
           loop: "{{ db_list }}"
           register: createdb_result
 
-        - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas"
+        - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas (Yetkiler ve sahiplikler korunur)"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists --no-owner --no-privileges {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
-        - name: "Adım 5: Geri yüklenen tüm nesnelerin (tablo, şema, sequence) sahipliğini {{ app_db_owner }} kullanıcısına aktar"
+        - name: "Adım 5: Veritabanı sahipliğini {{ app_db_owner }} olarak garantiye al"
           shell: >
-            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} -c \"ALTER DATABASE \\\"{{ item }}\\\" OWNER TO {{ app_db_owner }}; REASSIGN OWNED BY {{ dev_db_admin_user }} TO {{ app_db_owner }};\""
+            ssh -o StrictHostKeyChecking=no {{ ssh_user }}@{{ bridge_server }} "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c \"ALTER DATABASE \\\"{{ item }}\\\" OWNER TO {{ app_db_owner }};\""
           loop: "{{ db_list }}"
 
         - name: "Restore Logları ve Uyarılar"
@@ -103,7 +103,7 @@
 
         - name: "İşlem Özeti"
           debug:
-            msg: "Tüm veritabanları ({{ db_list }}) başarıyla restore edildi ve sahipliği {{ app_db_owner }} kullanıcısına devredildi."
+            msg: "Tüm veritabanları ({{ db_list }}) başarıyla restore edildi."
 
       rescue:
         - name: "HATA BİLDİRİMİ: pg_dump Hatası (Şifre gizlenerek basılır)"
