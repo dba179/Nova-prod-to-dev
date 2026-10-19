@@ -56,7 +56,6 @@
       add_host:
         name: "{{ bridge_server }}"
         groups: bridge_nodes
-        ansible_user: postgres
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
     - name: İşlem Bilgilendirmesi
@@ -72,41 +71,44 @@
     - name: Migration ve Restore Ana Bloğu
       block:
         - name: "Adım 1: İşlem sunucusunda ({{ bridge_server }}) geçici backup klasörünü aç"
-          file:
-            path: "{{ remote_backup_dir }}/{{ run_id }}"
-            state: directory
-            mode: '0755'
+          shell: >
+            su - postgres -c "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
           delegate_to: "{{ bridge_server }}"
+          become: true
 
         - name: "Adım 2: İşlem sunucusu üzerinden Prod VIP'den dump çek"
           shell: >
-            PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
+            su - postgres -c "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           delegate_to: "{{ bridge_server }}"
+          become: true
           no_log: true
           register: dump_result
           failed_when: dump_result.rc != 0
 
         - name: "Adım 3: Asıl hedef sunucuda ({{ restore_db_host | default(default_restore_host) }}) veritabanını oluştur ve sahibini {{ app_db_owner }} yap"
           shell: >
-            psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}
+            su - postgres -c "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}"
           loop: "{{ db_list }}"
           delegate_to: "{{ bridge_server }}"
+          become: true
           register: createdb_result
 
         - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas (Yetkiler ve sahiplikler korunur)"
           shell: >
-            pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
+            su - postgres -c "pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           delegate_to: "{{ bridge_server }}"
+          become: true
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
         - name: "Adım 5: Veritabanı sahipliğini {{ app_db_owner }} olarak garantiye al"
           shell: >
-            psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};'
+            su - postgres -c "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE \"{{ item }}\" OWNER TO {{ app_db_owner }};'"
           loop: "{{ db_list }}"
           delegate_to: "{{ bridge_server }}"
+          become: true
 
         - name: "Restore Logları ve Uyarılar"
           debug:
@@ -131,8 +133,8 @@
 
       always:
         - name: "Temizlik: İşlem sunucusundaki ({{ bridge_server }}) dump klasörünü tamamen sil"
-          file:
-            path: "{{ remote_backup_dir }}/{{ run_id }}"
-            state: absent
+          shell: >
+            rm -rf {{ remote_backup_dir }}/{{ run_id }}
           delegate_to: "{{ bridge_server }}"
+          become: true
           ignore_errors: yes
