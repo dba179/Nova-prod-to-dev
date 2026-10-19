@@ -1,16 +1,12 @@
 ---
 - name: Prod to Dev PostgreSQL Database Migration (Via Bridge Server to Dev Target)
-  hosts: localhost
-  connection: local
+  hosts: 10.14.8.18
   gather_facts: false
 
   vars:
     # Kaynak ve Hedef DB Hostları
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
-    
-    # İşlemi Yönetecek / Dump'ı Barındıracak Köprü Sunucu
-    bridge_server: "10.14.8.18"
     
     # Kullanıcılar
     prod_backup_user: "backupadm"
@@ -29,7 +25,7 @@
       - template1
 
     # Benzersiz İşlem Kimliği (Timestamp)
-    run_id: "{{ '%Y%m%d_%H%M%S' | strftime }}"
+    run_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
   pre_tasks:
     - name: "Parametre Kontrolü: DB_NAME girilmiş mi?"
@@ -52,34 +48,26 @@
       when: item | lower in restricted_dbs
       loop: "{{ db_list }}"
 
-    - name: "Köprü sunucuyu ({{ bridge_server }}) çalışma envanterine ekle"
-      add_host:
-        name: "{{ bridge_server }}"
-        groups: bridge_nodes
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
-
     - name: İşlem Bilgilendirmesi
       debug:
         msg: 
           - "Kaynak Prod VIP : {{ backup_db_host | default(default_backup_host) }}"
           - "Hedef Dev DB    : {{ restore_db_host | default(default_restore_host) }}"
-          - "İşlem Sunucusu  : {{ bridge_server }} (Dizin: {{ remote_backup_dir }})"
+          - "İşlem Sunucusu  : 10.14.8.18 (Dizin: {{ remote_backup_dir }})"
           - "DB Sahibi (Owner): {{ app_db_owner }}"
           - "Taşınacak DB'ler: {{ db_list }}"
 
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Adım 1: İşlem sunucusunda ({{ bridge_server }}) geçici backup klasörünü aç"
+        - name: "Adım 1: İşlem sunucusunda geçici backup klasörünü aç"
           shell: >
             mkdir -p {{ remote_backup_dir }}/{{ run_id }}
-          delegate_to: "{{ bridge_server }}"
 
         - name: "Adım 2: İşlem sunucusu üzerinden Prod VIP'den dump çek"
           shell: >
             PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
           loop: "{{ db_list }}"
-          delegate_to: "{{ bridge_server }}"
           no_log: true
           register: dump_result
           failed_when: dump_result.rc != 0
@@ -88,14 +76,12 @@
           shell: >
             psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}
           loop: "{{ db_list }}"
-          delegate_to: "{{ bridge_server }}"
           register: createdb_result
 
-        - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas (Yetkiler ve sahiplikler korunur)"
+        - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas"
           shell: >
             pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
           loop: "{{ db_list }}"
-          delegate_to: "{{ bridge_server }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
@@ -103,7 +89,6 @@
           shell: >
             psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};'
           loop: "{{ db_list }}"
-          delegate_to: "{{ bridge_server }}"
 
         - name: "Restore Logları ve Uyarılar"
           debug:
@@ -127,8 +112,7 @@
             msg: "Pipeline sırasında beklenmeyen bir hata oluştu! Yukarıdaki task çıktılarını kontrol edin."
 
       always:
-        - name: "Temizlik: İşlem sunucusundaki ({{ bridge_server }}) dump klasörünü tamamen sil"
+        - name: "Temizlik: İşlem sunucusundaki dump klasörünü tamamen sil"
           shell: >
             rm -rf {{ remote_backup_dir }}/{{ run_id }}
-          delegate_to: "{{ bridge_server }}"
           ignore_errors: yes
