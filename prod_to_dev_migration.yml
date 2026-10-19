@@ -4,18 +4,28 @@
   gather_facts: false
 
   vars:
+    # Kaynak ve Hedef DB Hostları
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
+    
+    # Kullanıcılar
     prod_backup_user: "backupadm"
     dev_db_admin_user: "postgres"
     app_db_owner: "nova_adm"
+    
+    # Disk Yolu (10.14.8.18 üzerindeki geçici alan)
     remote_backup_dir: "/postgres/data/backup"
+    
+    # Yasaklı Sistem Veritabanları
     restricted_dbs:
       - postgres
       - admin
       - master
       - template0
       - template1
+
+    # Benzersiz İşlem Kimliği (Timestamp)
+    run_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
   pre_tasks:
     - name: "Parametre Kontrolü: DB_NAME girilmiş mi?"
@@ -28,10 +38,9 @@
         msg: "HATA: pg_password tanımlı değil! Job Template'e Credential bağlandığından emin olun."
       when: pg_password is not defined or pg_password == ''
 
-    - name: "Veritabanı listesini hazırla ve sabit run_id oluştur"
+    - name: "Veritabanı listesini hazırla"
       set_fact:
         db_list: "{{ db_names.split(',') | map('trim') | select('match', '^.+$') | list }}"
-        run_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
     - name: "Güvenlik Kontrolü: Sistem veritabanı taşınamaz!"
       fail:
@@ -51,42 +60,34 @@
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Adım 1: İşlem sunucusunda geçici backup klasörünü aç"
+        - name: "Adım 1: İşlem sunucusunda geçici backup klasörünü postgres kullanıcısı ile aç"
           shell: >
-            mkdir -p {{ remote_backup_dir }}/{{ run_id }}
+            su - postgres -c "mkdir -p {{ remote_backup_dir }}/{{ run_id }}"
 
         - name: "Adım 2: İşlem sunucusu üzerinden Prod VIP'den dump çek"
           shell: >
-            pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
-          environment:
-            PGPASSWORD: "{{ pg_password }}"
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/pgsql-13/bin:/usr/local/bin:/usr/bin:/bin"
+            su - postgres -c "PGPASSWORD='{{ pg_password }}' pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
+          no_log: true
           register: dump_result
           failed_when: dump_result.rc != 0
 
         - name: "Adım 3: Asıl hedef sunucuda ({{ restore_db_host | default(default_restore_host) }}) veritabanını oluştur ve sahibini {{ app_db_owner }} yap"
           shell: >
-            psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}
-          environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/pgsql-13/bin:/usr/local/bin:/usr/bin:/bin"
+            su - postgres -c "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ item }}'\" | grep -q 1 || createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}"
           loop: "{{ db_list }}"
           register: createdb_result
 
         - name: "Adım 4: Asıl hedef sunucuya ({{ restore_db_host | default(default_restore_host) }}) uzaktan pg_restore bas"
           shell: >
-            pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump
-          environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/pgsql-13/bin:/usr/local/bin:/usr/bin:/bin"
+            su - postgres -c "pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump"
           loop: "{{ db_list }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
         - name: "Adım 5: Veritabanı sahipliğini {{ app_db_owner }} olarak garantiye al"
           shell: >
-            psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};'
-          environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/pgsql-13/bin:/usr/local/bin:/usr/bin:/bin"
+            su - postgres -c "psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE \"{{ item }}\" OWNER TO {{ app_db_owner }};'"
           loop: "{{ db_list }}"
 
         - name: "Restore Logları ve Uyarılar"
@@ -98,6 +99,17 @@
         - name: "İşlem Özeti"
           debug:
             msg: "Tüm veritabanları ({{ db_list }}) başarıyla restore edildi."
+
+      rescue:
+        - name: "HATA BİLDİRİMİ: pg_dump Hatası (Şifre gizlenerek basılır)"
+          fail:
+            msg: "HATA: pg_dump adımında sorun oluştu! Sunucu yanıtı: {{ item.stderr }}"
+          loop: "{{ dump_result.results | default([]) }}"
+          when: item.failed is defined and item.failed
+
+        - name: "HATA BİLDİRİMİ: Genel Hata"
+          fail:
+            msg: "Pipeline sırasında beklenmeyen bir hata oluştu! Yukarıdaki task çıktılarını kontrol edin."
 
       always:
         - name: "Temizlik: İşlem sunucusundaki dump klasörünü tamamen sil"
