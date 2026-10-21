@@ -4,29 +4,18 @@
   gather_facts: false
 
   vars:
-    # Kaynak ve Hedef DB Hostları
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
-    
-    # Kullanıcılar
     prod_backup_user: "backupadm"
     dev_db_admin_user: "postgres"
     app_db_owner: "nova_adm"
-    
-    # Dizin ve Log Yolları
     remote_backup_dir: "/postgres/data/backup"
-    log_file: "/postgres/data/backup/migration_{{ run_id }}.log"
-    
-    # Yasaklı Sistem Veritabanları
     restricted_dbs:
       - postgres
       - admin
       - master
       - template0
       - template1
-
-    # Benzersiz İşlem Kimliği (Timestamp)
-    run_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
   pre_tasks:
     - name: "Parametre Kontrolü: DB_NAME girilmiş mi?"
@@ -39,9 +28,14 @@
         msg: "HATA: pg_password tanımlı değil! Job Template'e Credential bağlandığından emin olun."
       when: pg_password is not defined or pg_password == ''
 
-    - name: "Veritabanı listesini hazırla"
+    - name: "Sabit run_id ve veritabanı listesini hazırla"
       set_fact:
+        run_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
         db_list: "{{ db_names.split(',') | map('trim') | select('match', '^.+$') | list }}"
+
+    - name: "Log dosyası yolunu sabitle"
+      set_fact:
+        log_file: "{{ remote_backup_dir }}/migration_{{ run_id }}.log"
 
     - name: "Güvenlik Kontrolü: Sistem veritabanı taşınamaz!"
       fail:
@@ -68,7 +62,7 @@
             mkdir -p {{ remote_backup_dir }}/{{ run_id }} &&
             echo "=== MIGRATION BAŞLADI: $(date) ===" > {{ log_file }}
 
-        - name: "Adım 2: Prod VIP'den dump çek (Hatalar loga yazılır)"
+        - name: "Adım 2: Prod VIP'den dump çek"
           shell: >
             echo "--- [$(date)] {{ item }} pg_dump Başlıyor ---" >> {{ log_file }} &&
             pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
@@ -87,7 +81,7 @@
             PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
 
-        - name: "Adım 4: Dev sunucusuna pg_restore bas (Detaylar loga yazılır)"
+        - name: "Adım 4: Dev sunucusuna pg_restore bas"
           shell: >
             echo "--- [$(date)] {{ item }} pg_restore Başlıyor ---" >> {{ log_file }} &&
             pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
@@ -125,7 +119,7 @@
               - "{{ error_log_content.stdout_lines | default(['Log dosyası okunamadı']) }}"
 
       always:
-        - name: "Temizlik: Yalnızca geçici dump dosyalarını sil (Log dosyası saklanır)"
+        - name: "Temizlik: Yalnızca geçici dump klasörünü sil"
           shell: >
             rm -rf {{ remote_backup_dir }}/{{ run_id }}
           ignore_errors: yes
