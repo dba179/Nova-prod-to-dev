@@ -68,7 +68,7 @@
             pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
           environment:
             PGPASSWORD: "{{ pg_password }}"
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/local/bin:/usr/bin:/bin"
+            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
           register: dump_result
 
@@ -78,7 +78,7 @@
             (psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 ||
             createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}) >> {{ log_file }} 2>&1
           environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/local/bin:/usr/bin:/bin"
+            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
 
         - name: "Adım 4: Dev sunucusuna pg_restore bas"
@@ -86,7 +86,7 @@
             echo "--- [$(date)] {{ item }} pg_restore Başlıyor ---" >> {{ log_file }} &&
             pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
           environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/local/bin:/usr/bin:/bin"
+            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
@@ -95,7 +95,7 @@
           shell: >
             psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};' >> {{ log_file }} 2>&1
           environment:
-            PATH: "/usr/pgsql-17/bin:/usr/pgsql-16/bin:/usr/pgsql-15/bin:/usr/pgsql-14/bin:/usr/local/bin:/usr/bin:/bin"
+            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
 
         - name: "Log Dosyasını Ekrana Yazdır"
