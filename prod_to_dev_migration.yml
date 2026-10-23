@@ -2,8 +2,7 @@
 - name: Prod to Dev PostgreSQL Database Migration (Via Bridge Server to Dev Target)
   hosts: 10.14.8.18
   gather_facts: false
-  become: true
-  become_user: postgres
+
 
   vars:
     # Veritabanı Sunucu IP'leri
