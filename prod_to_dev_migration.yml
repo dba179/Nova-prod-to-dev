@@ -9,14 +9,14 @@
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
     
-    # DB Seviyesindeki Superuser (Her iki DB'de de bu kullanılır)
+    # DB Seviyesindeki Superuser (Her iki tarafta da backupadm)
     db_super_user: "backupadm"
     app_db_owner: "nova_adm"
     
     # İşletim Sistemi Dizin Tanımları
     remote_backup_dir: "/postgres/data/backup"
     
-    # Taşınması Yasaklı Sistem Veritabanları
+    # Yasaklı Sistem DB'leri
     restricted_dbs:
       - postgres
       - admin
@@ -50,7 +50,7 @@
       when: item | lower in restricted_dbs
       loop: "{{ db_list }}"
 
-    - name: İşlem Bilgilendirmesi
+    - name: "İşlem Başlangıç Özeti"
       debug:
         msg: 
           - "Kaynak Prod VIP : {{ backup_db_host | default(default_backup_host) }}"
@@ -100,29 +100,31 @@
 
         - name: "Adım 5: Veritabanı sahipliğini {{ app_db_owner }} olarak ayarla"
           shell: >
-            /usr/lib/postgresql/17/bin/psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ db_super_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};' >> {{ log_file }} 2>&1
+            echo "--- [$(date)] {{ item }} Sahiplik Ataması (OWNER TO {{ app_db_owner }}) ---" >> {{ log_file }} &&
+            /usr/lib/postgresql/17/bin/psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ db_super_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};' >> {{ log_file }} 2>&1 &&
+            echo "=== MIGRATION BAŞARIYLA TAMAMLANDI: $(date) ===" >> {{ log_file }}
           environment:
             PGPASSWORD: "{{ pg_password }}"
           loop: "{{ db_list }}"
 
-        - name: "Log Dosyasını Ekrana Yazdır"
-          shell: "tail -n 40 {{ log_file }}"
-          register: process_logs
+        - name: "Tüm Migration Loglarını Oku"
+          shell: "cat {{ log_file }}"
+          register: full_process_logs
 
-        - name: "İşlem Özeti ve Log Çıktısı"
+        - name: "MIGRATION LOGLARI (BAŞARILI BİTİŞ)"
           debug:
-            msg: "{{ process_logs.stdout_lines }}"
+            msg: "{{ full_process_logs.stdout_lines }}"
 
       rescue:
-        - name: "Hata Anında Log Dosyasını Oku"
-          shell: "tail -n 50 {{ log_file }}"
+        - name: "Hata Anında Tüm Log Dosyasını Oku"
+          shell: "cat {{ log_file }}"
           register: error_log_content
           ignore_errors: yes
 
         - name: "HATA BİLDİRİMİ: Detaylı Log Çıktısı"
           fail:
             msg:
-              - "İşlem sırasında hata meydana geldi! İşte son log satırları:"
+              - "İşlem sırasında hata meydana geldi! İşte dosyadaki tüm loglar:"
               - "{{ error_log_content.stdout_lines | default(['Log dosyası okunamadı']) }}"
 
       always:
