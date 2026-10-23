@@ -2,7 +2,8 @@
 - name: Prod to Dev PostgreSQL Database Migration (Via Bridge Server to Dev Target)
   hosts: 10.14.8.18
   gather_facts: false
-  remote_user: postgres
+  become: true
+  become_user: postgres
 
   vars:
     # Veritabanı Sunucu IP'leri
@@ -55,7 +56,7 @@
         msg: 
           - "Kaynak Prod VIP : {{ backup_db_host | default(default_backup_host) }}"
           - "Hedef Dev DB    : {{ restore_db_host | default(default_restore_host) }}"
-          - "İşlem Sunucusu  : 10.14.8.18 (OS Kullanıcısı: postgres)"
+          - "İşlem Sunucusu  : 10.14.8.18 (Çalıştırıcı: postgres)"
           - "DB Superuser    : {{ db_super_user }}"
           - "DB Sahibi       : {{ app_db_owner }}"
           - "Geçici Dizin    : {{ remote_backup_dir }}/{{ run_id }}"
