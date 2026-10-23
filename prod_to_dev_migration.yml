@@ -2,14 +2,22 @@
 - name: Prod to Dev PostgreSQL Database Migration (Via Bridge Server to Dev Target)
   hosts: 10.14.8.18
   gather_facts: false
+  remote_user: postgres
 
   vars:
+    # DB Sunucu IP'leri
     default_backup_host: "172.18.42.140"
     default_restore_host: "10.15.42.93"
+    
+    # DB Kullanıcıları
     prod_backup_user: "backupadm"
     dev_db_admin_user: "postgres"
     app_db_owner: "nova_adm"
+    
+    # Dizin Tanımları
     remote_backup_dir: "/postgres/data/backup"
+    
+    # Taşınması Yasaklı Sistem Veritabanları
     restricted_dbs:
       - postgres
       - admin
@@ -23,7 +31,7 @@
         msg: "HATA: Veritabanı adı girilmedi! Lütfen AWX üzerinden taşınacak DB adını girin."
       when: db_names is not defined or db_names == ''
 
-    - name: "Güvenlik Kontrolü: Şifre credential üzerinden geldi mi?"
+    - name: "Güvenlik Kontrolü: Prod şifresi credential üzerinden geldi mi?"
       fail:
         msg: "HATA: pg_password tanımlı değil! Job Template'e Credential bağlandığından emin olun."
       when: pg_password is not defined or pg_password == ''
@@ -48,7 +56,7 @@
         msg: 
           - "Kaynak Prod VIP : {{ backup_db_host | default(default_backup_host) }}"
           - "Hedef Dev DB    : {{ restore_db_host | default(default_restore_host) }}"
-          - "İşlem Sunucusu  : 10.14.8.18"
+          - "İşlem Sunucusu  : 10.14.8.18 (Kullanıcı: postgres)"
           - "Geçici Dizin    : {{ remote_backup_dir }}/{{ run_id }}"
           - "Log Dosyası     : {{ log_file }}"
           - "DB Sahibi       : {{ app_db_owner }}"
@@ -57,45 +65,38 @@
   tasks:
     - name: Migration ve Restore Ana Bloğu
       block:
-        - name: "Adım 1: Dizin ve Log dosyasını hazırla"
+        - name: "Adım 1: Dizin ve Log dosyasını postgres kullanıcısıyla hazırla"
           shell: >
             mkdir -p {{ remote_backup_dir }}/{{ run_id }} &&
             echo "=== MIGRATION BAŞLADI: $(date) ===" > {{ log_file }}
 
-        - name: "Adım 2: Prod VIP'den dump çek"
+        - name: "Adım 2: Prod VIP'den dump çek (PostgreSQL 17 Client)"
           shell: >
             echo "--- [$(date)] {{ item }} pg_dump Başlıyor ---" >> {{ log_file }} &&
-            pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
+            /usr/lib/postgresql/17/bin/pg_dump -h {{ backup_db_host | default(default_backup_host) }} -U {{ prod_backup_user }} -d {{ item }} -Fc -f {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
           environment:
             PGPASSWORD: "{{ pg_password }}"
-            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
           loop: "{{ db_list }}"
           register: dump_result
 
         - name: "Adım 3: Dev sunucusunda veritabanını oluştur (Yoksa)"
           shell: >
             echo "--- [$(date)] {{ item }} Dev DB Kontrol/Oluşturma ---" >> {{ log_file }} &&
-            (psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 ||
-            createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}) >> {{ log_file }} 2>&1
-          environment:
-            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
+            (/usr/lib/postgresql/17/bin/psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1 ||
+            /usr/lib/postgresql/17/bin/createdb -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -O {{ app_db_owner }} {{ item }}) >> {{ log_file }} 2>&1
           loop: "{{ db_list }}"
 
         - name: "Adım 4: Dev sunucusuna pg_restore bas"
           shell: >
             echo "--- [$(date)] {{ item }} pg_restore Başlıyor ---" >> {{ log_file }} &&
-            pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
-          environment:
-            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
+            /usr/lib/postgresql/17/bin/pg_restore -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d {{ item }} --clean --if-exists {{ remote_backup_dir }}/{{ run_id }}/{{ item }}_{{ run_id }}.dump >> {{ log_file }} 2>&1
           loop: "{{ db_list }}"
           register: restore_output
           failed_when: restore_output.rc not in [0, 1]
 
         - name: "Adım 5: Veritabanı sahipliğini {{ app_db_owner }} olarak ayarla"
           shell: >
-            psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};' >> {{ log_file }} 2>&1
-          environment:
-            PATH: "/usr/lib/postgresql/17/bin:/usr/pgsql-17/bin:/usr/local/bin:/usr/bin:/bin"
+            /usr/lib/postgresql/17/bin/psql -h {{ restore_db_host | default(default_restore_host) }} -U {{ dev_db_admin_user }} -d postgres -c 'ALTER DATABASE "{{ item }}" OWNER TO {{ app_db_owner }};' >> {{ log_file }} 2>&1
           loop: "{{ db_list }}"
 
         - name: "Log Dosyasını Ekrana Yazdır"
@@ -119,7 +120,7 @@
               - "{{ error_log_content.stdout_lines | default(['Log dosyası okunamadı']) }}"
 
       always:
-        - name: "Temizlik: Yalnızca geçici dump klasörünü sil"
+        - name: "Temizlik: Yalnızca geçici dump klasörünü sil (Loglar kalır)"
           shell: >
             rm -rf {{ remote_backup_dir }}/{{ run_id }}
           ignore_errors: yes
